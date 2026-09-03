@@ -87,6 +87,8 @@ class MRM_Payments_Hub_Single {
     add_action('admin_post_mrm_marketing_email_save_lists', array($this, 'handle_marketing_email_save_lists'));
     add_action('admin_post_mrm_marketing_save_newsletter_welcome_email', array($this, 'handle_marketing_save_newsletter_welcome_email'));
     add_action('admin_post_mrm_marketing_email_send', array($this, 'handle_marketing_email_send'));
+    add_action('admin_post_mrm_marketing_queue_send_now', array($this, 'handle_marketing_queue_send_now'));
+    add_action('admin_post_mrm_marketing_queue_retry_failed', array($this, 'handle_marketing_queue_retry_failed'));
     add_action('mrm_marketing_process_queue', array($this, 'mrm_marketing_process_queue'));
     add_action('wp_mail_failed', array($this, 'mrm_marketing_capture_wp_mail_error'));
     add_action(
@@ -18860,10 +18862,82 @@ community@example.org",
         true
       )
     ) {
-      $this->mrm_marketing_queue_delete_campaign_attachments($campaign);
+      /*
+       * Keep temporary attachments available while a campaign still has
+       * failed recipients so Retry Failed can resend the original message.
+       */
+      if ($totals['failed'] === 0) {
+        $this->mrm_marketing_queue_delete_campaign_attachments($campaign);
+      }
+
       $lists = json_decode((string)$campaign['list_keys'], true);
       $this->mrm_marketing_add_sent_log_item($campaign['subject'], is_array($lists) ? $lists : array(), (int)$campaign['recipient_count'], $totals['sent'], $totals['failed'], $campaign['send_mode']);
     }
+  }
+
+  private function mrm_marketing_sender_transport_ready() {
+    $sender = $this->mrm_marketing_sender_email();
+
+    /*
+     * If FluentSMTP is active but this From address is not mapped,
+     * do not allow marketing email to silently fall back to another
+     * sender such as no-reply@.
+     */
+    if (
+      function_exists('fluentMailIsListedSenderEmail') &&
+      !fluentMailIsListedSenderEmail($sender)
+    ) {
+      return new WP_Error(
+        'mrm_marketing_sender_not_mapped',
+        'FluentSMTP does not have contact@lowbrass-lessons.com configured as an active sender connection.'
+      );
+    }
+
+    return true;
+  }
+
+  private function mrm_marketing_queue_due_count() {
+    global $wpdb;
+    $queue = $this->table_marketing_queue();
+    if (!$this->mrm_marketing_table_exists($queue)) return 0;
+    $now = current_time('mysql', true);
+
+    return (int)$wpdb->get_var($wpdb->prepare(
+      "SELECT COUNT(*) FROM {$queue} WHERE status IN ('queued','retry') AND available_at <= %s",
+      $now
+    ));
+  }
+
+  private function mrm_marketing_spawn_cron_now() {
+    $cron_url = site_url('/wp-cron.php?doing_wp_cron=' . rawurlencode(sprintf('%.22F', microtime(true))));
+    $result = wp_remote_post($cron_url, array(
+      'timeout' => 1,
+      'blocking' => false,
+      'sslverify' => apply_filters('https_local_ssl_verify', false),
+    ));
+    return !is_wp_error($result);
+  }
+
+  private function mrm_marketing_kick_queue() {
+    if ($this->mrm_marketing_queue_due_count() < 1) return true;
+    if (get_transient('mrm_marketing_queue_kick_pending')) return true;
+
+    set_transient('mrm_marketing_queue_kick_pending', 1, 30);
+    $scheduled = wp_schedule_single_event(
+      time(),
+      'mrm_marketing_process_queue',
+      array(wp_generate_uuid4()),
+      true
+    );
+
+    if (is_wp_error($scheduled) || !$scheduled) {
+      delete_transient('mrm_marketing_queue_kick_pending');
+      return false;
+    }
+
+    $spawned = $this->mrm_marketing_spawn_cron_now();
+    if (!$spawned) delete_transient('mrm_marketing_queue_kick_pending');
+    return $spawned;
   }
 
   private function mrm_marketing_sender_force_begin() {
@@ -18912,7 +18986,10 @@ community@example.org",
 
   public function mrm_marketing_process_queue() {
     global $wpdb;
-    if (!$this->mrm_marketing_queue_lock_acquire()) return;
+    delete_transient('mrm_marketing_queue_kick_pending');
+    if (!$this->mrm_marketing_queue_lock_acquire()) {
+      return;
+    }
     $queue = $this->table_marketing_queue();
     $campaigns = $this->table_marketing_campaigns();
     $now = current_time('mysql', true);
@@ -18941,6 +19018,16 @@ community@example.org",
         $email = strtolower(sanitize_email((string)$job['recipient_email']));
         $send_mode = (string)$job['send_mode'];
         if ($send_mode !== 'instructor') {
+          $transport_ready = $this->mrm_marketing_sender_transport_ready();
+          if (is_wp_error($transport_ready)) {
+            $wpdb->update($queue, array(
+              'status' => 'failed',
+              'claimed_at' => null,
+              'last_error' => $transport_ready->get_error_message(),
+            ), array('id' => $job['id']));
+            continue;
+          }
+
           $unsubscribed = $this->mrm_marketing_unsubscribed_emails();
           $newsletter_unsubscribed = $this->mrm_marketing_newsletter_unsubscribed_emails();
           $scope = sanitize_key((string)$job['unsubscribe_scope']);
@@ -19001,6 +19088,118 @@ community@example.org",
       $this->mrm_marketing_mail_capture_active = false;
       $this->mrm_marketing_queue_lock_release();
     }
+
+    if ($this->mrm_marketing_queue_due_count() > 0) {
+      $this->mrm_marketing_kick_queue();
+    }
+  }
+
+  public function handle_marketing_queue_send_now() {
+    if (!current_user_can('manage_options')) {
+      wp_die('You do not have permission to process the marketing queue.');
+    }
+    check_admin_referer('mrm_marketing_queue_send_now', 'mrm_marketing_queue_send_now_nonce');
+
+    $this->mrm_marketing_process_queue();
+    $kick_ok = true;
+    if ($this->mrm_marketing_queue_due_count() > 0) {
+      $kick_ok = $this->mrm_marketing_kick_queue();
+    }
+
+    $args = array(
+      'page' => 'mrm-pay-hub-marketing-email-lists',
+      'mrm_marketing_queue_send_now' => '1',
+    );
+    if (!$kick_ok) {
+      $args['mrm_marketing_error'] = rawurlencode('The first queue batch was processed, but WordPress could not start the next background batch.');
+    }
+    wp_safe_redirect(add_query_arg($args, admin_url('admin.php')));
+    exit;
+  }
+
+  public function handle_marketing_queue_retry_failed() {
+    if (!current_user_can('manage_options')) {
+      wp_die('You do not have permission to retry marketing email.');
+    }
+
+    $campaign_id = isset($_POST['mrm_marketing_campaign_id'])
+      ? absint($_POST['mrm_marketing_campaign_id'])
+      : 0;
+    if ($campaign_id < 1) wp_die('Invalid campaign.');
+    check_admin_referer(
+      'mrm_marketing_queue_retry_failed_' . $campaign_id,
+      'mrm_marketing_queue_retry_failed_nonce'
+    );
+
+    global $wpdb;
+    $campaigns = $this->table_marketing_campaigns();
+    $queue = $this->table_marketing_queue();
+    $campaign = $wpdb->get_row($wpdb->prepare(
+      "SELECT * FROM {$campaigns} WHERE id = %d",
+      $campaign_id
+    ), ARRAY_A);
+
+    if (!$campaign) {
+      wp_safe_redirect(add_query_arg(array(
+        'page' => 'mrm-pay-hub-marketing-email-lists',
+        'mrm_marketing_error' => rawurlencode('The selected marketing campaign could not be found.'),
+      ), admin_url('admin.php')));
+      exit;
+    }
+
+    $attachment_paths = json_decode((string)($campaign['attachments'] ?? ''), true);
+    if (is_array($attachment_paths) && $attachment_paths) {
+      foreach ($attachment_paths as $attachment_path) {
+        if (is_string($attachment_path) && $attachment_path !== '' && !file_exists($attachment_path)) {
+          wp_safe_redirect(add_query_arg(array(
+            'page' => 'mrm-pay-hub-marketing-email-lists',
+            'mrm_marketing_error' => rawurlencode('This campaign cannot be retried safely because one or more original attachment files are no longer available. Create a new campaign instead.'),
+          ), admin_url('admin.php')));
+          exit;
+        }
+      }
+    }
+
+    if ((string)$campaign['send_mode'] !== 'instructor') {
+      $transport_ready = $this->mrm_marketing_sender_transport_ready();
+      if (is_wp_error($transport_ready)) {
+        wp_safe_redirect(add_query_arg(array(
+          'page' => 'mrm-pay-hub-marketing-email-lists',
+          'mrm_marketing_error' => rawurlencode($transport_ready->get_error_message()),
+        ), admin_url('admin.php')));
+        exit;
+      }
+    }
+
+    $now = current_time('mysql', true);
+    $retried = $wpdb->query($wpdb->prepare(
+      "UPDATE {$queue}
+       SET status='retry', attempts=0, available_at=%s, claimed_at=NULL, sent_at=NULL, last_error=''
+       WHERE campaign_id=%d AND status='failed'",
+      $now,
+      $campaign_id
+    ));
+
+    if ($retried === false) {
+      wp_safe_redirect(add_query_arg(array(
+        'page' => 'mrm-pay-hub-marketing-email-lists',
+        'mrm_marketing_error' => rawurlencode('The failed recipients could not be returned to the queue.'),
+      ), admin_url('admin.php')));
+      exit;
+    }
+
+    $this->mrm_marketing_queue_finalize_campaign($campaign_id);
+    $kick_ok = (int)$retried > 0 ? $this->mrm_marketing_kick_queue() : true;
+    $args = array(
+      'page' => 'mrm-pay-hub-marketing-email-lists',
+      'mrm_marketing_retried' => (string)(int)$retried,
+      'mrm_marketing_campaign' => (string)$campaign_id,
+    );
+    if (!$kick_ok) {
+      $args['mrm_marketing_error'] = rawurlencode('Failed recipients were returned to the queue, but WordPress could not start the background worker. Use Send queued now.');
+    }
+    wp_safe_redirect(add_query_arg($args, admin_url('admin.php')));
+    exit;
   }
 
   private function mrm_marketing_recent_campaigns($limit = 10) {
@@ -19177,6 +19376,12 @@ community@example.org",
       'newsletter',
       $mailing_address
     );
+
+    $transport_ready = $this->mrm_marketing_sender_transport_ready();
+    if (is_wp_error($transport_ready)) {
+      $this->mrm_marketing_record_newsletter_welcome_attempt($email, 'failed');
+      return false;
+    }
 
     $from_name = 'Low Brass Lessons';
     $from_email = $this->mrm_marketing_sender_email();
@@ -19775,6 +19980,17 @@ community@example.org",
       exit;
     }
 
+    if ($send_mode !== 'instructor') {
+      $transport_ready = $this->mrm_marketing_sender_transport_ready();
+      if (is_wp_error($transport_ready)) {
+        wp_safe_redirect(add_query_arg(array(
+          'page' => 'mrm-pay-hub-marketing-email-lists',
+          'mrm_marketing_error' => rawurlencode($transport_ready->get_error_message()),
+        ), admin_url('admin.php')));
+        exit;
+      }
+    }
+
     $delivery_map = array();
     if ($send_mode === 'instructor') {
       $recipients = $this->mrm_marketing_get_combined_recipients($selected_lists, false);
@@ -19806,12 +20022,16 @@ community@example.org",
       exit;
     }
 
-    wp_schedule_single_event(time() + 5, 'mrm_marketing_process_queue');
-    wp_safe_redirect(add_query_arg(array(
+    $kick_ok = $this->mrm_marketing_kick_queue();
+    $redirect_args = array(
       'page' => 'mrm-pay-hub-marketing-email-lists',
       'mrm_marketing_queued' => (string)count($recipients),
       'mrm_marketing_campaign' => (string)$queued,
-    ), admin_url('admin.php')));
+    );
+    if (!$kick_ok) {
+      $redirect_args['mrm_marketing_error'] = rawurlencode('The campaign was queued, but WordPress could not start the background queue request. Use Send queued now.');
+    }
+    wp_safe_redirect(add_query_arg($redirect_args, admin_url('admin.php')));
     exit;
   }
 
@@ -27313,6 +27533,7 @@ MRM_TAX_RULES;
     $defs = $this->mrm_marketing_default_lists();
     $manual_lists = $this->mrm_marketing_manual_lists();
     $sender_email = $this->mrm_marketing_sender_email();
+    $sender_transport_status = $this->mrm_marketing_sender_transport_ready();
     $mailing_address = (string)get_option(
       'mrm_pay_hub_marketing_mailing_address',
       ''
@@ -27372,7 +27593,15 @@ MRM_TAX_RULES;
     if (!empty($_GET['mrm_marketing_queued'])) {
       echo '<div class="notice notice-success"><p>Marketing email campaign queued for '
         . esc_html((string)$_GET['mrm_marketing_queued'])
-        . ' recipient(s). The durable queue will continue sending in the background and retry temporary failures.</p></div>';
+        . ' recipient(s). The queue was actively started and will continue draining currently due recipients in the background.</p></div>';
+    }
+    if (!empty($_GET['mrm_marketing_queue_send_now'])) {
+      echo '<div class="notice notice-success"><p>The marketing queue was manually started.</p></div>';
+    }
+    if (isset($_GET['mrm_marketing_retried'])) {
+      echo '<div class="notice notice-success"><p>Returned '
+        . esc_html((string)absint($_GET['mrm_marketing_retried']))
+        . ' failed recipient(s) to the queue.</p></div>';
     }
     if (!empty($_GET['mrm_marketing_resubscribed'])) {
       $restored_scope = isset($_GET['mrm_marketing_resubscribe_scope']) ? sanitize_key(wp_unslash($_GET['mrm_marketing_resubscribe_scope'])) : 'marketing';
@@ -27386,15 +27615,38 @@ MRM_TAX_RULES;
     if (!empty($recent_campaigns)) {
       echo '<div style="background:#fff;border:1px solid #ccd0d4;border-radius:12px;padding:18px;margin:16px 0 20px;">';
       echo '<h2 style="margin-top:0;">Recent Campaign Queue</h2>';
-      echo '<table class="widefat striped"><thead><tr><th>Created</th><th>Subject</th><th>Status</th><th>Recipients</th><th>Sent</th><th>Failed</th><th>Suppressed</th></tr></thead><tbody>';
+      echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin:0 0 14px;">';
+      echo '<input type="hidden" name="action" value="mrm_marketing_queue_send_now">';
+      wp_nonce_field('mrm_marketing_queue_send_now', 'mrm_marketing_queue_send_now_nonce');
+      echo '<button type="submit" class="button button-primary">Send queued now</button>';
+      echo '<span class="description" style="margin-left:8px;">Processes a batch immediately and starts the remaining due queue without requiring a page refresh.</span>';
+      echo '</form>';
+      echo '<table class="widefat striped"><thead><tr><th>Created</th><th>Subject</th><th>Status</th><th>Recipients</th><th>Sent</th><th>Failed</th><th>Suppressed</th><th>Actions</th></tr></thead><tbody>';
       foreach ($recent_campaigns as $campaign) {
+        $campaign_id = absint($campaign['id']);
+        $status_label = str_replace('_', ' ', ucfirst((string)$campaign['status']));
         echo '<tr><td>' . esc_html(get_date_from_gmt((string)$campaign['created_at'])) . '</td>';
         echo '<td>' . esc_html((string)$campaign['subject']) . '</td>';
-        echo '<td>' . esc_html(ucfirst((string)$campaign['status'])) . '</td>';
+        echo '<td>' . esc_html($status_label) . '</td>';
         echo '<td>' . esc_html((string)$campaign['recipient_count']) . '</td>';
         echo '<td>' . esc_html((string)$campaign['sent_count']) . '</td>';
         echo '<td>' . esc_html((string)$campaign['failed_count']) . '</td>';
-        echo '<td>' . esc_html((string)$campaign['suppressed_count']) . '</td></tr>';
+        echo '<td>' . esc_html((string)$campaign['suppressed_count']) . '</td>';
+        echo '<td>';
+        if ((int)$campaign['failed_count'] > 0) {
+          echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin:0;">';
+          echo '<input type="hidden" name="action" value="mrm_marketing_queue_retry_failed">';
+          echo '<input type="hidden" name="mrm_marketing_campaign_id" value="' . esc_attr((string)$campaign_id) . '">';
+          wp_nonce_field(
+            'mrm_marketing_queue_retry_failed_' . $campaign_id,
+            'mrm_marketing_queue_retry_failed_nonce'
+          );
+          echo '<button type="submit" class="button">Retry failed</button>';
+          echo '</form>';
+        } else {
+          echo '&mdash;';
+        }
+        echo '</td></tr>';
       }
       echo '</tbody></table>';
       echo '</div>';
@@ -27603,6 +27855,14 @@ MRM_TAX_RULES;
       . 'Marketing emails and the automated newsletter welcome email send From contact@lowbrass-lessons.com. '
       . 'No Reply-To header is added, so normal replies go to the From address.'
       . '</p>';
+
+    if (is_wp_error($sender_transport_status)) {
+      echo '<p style="color:#b32d2e;font-weight:600;">'
+        . esc_html($sender_transport_status->get_error_message())
+        . '</p>';
+    } elseif (function_exists('fluentMailIsListedSenderEmail')) {
+      echo '<p style="color:#008a20;font-weight:600;">FluentSMTP recognizes contact@lowbrass-lessons.com as an active sender.</p>';
+    }
 
     echo '<input'
       . ' type="email"'
