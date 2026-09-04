@@ -17836,6 +17836,238 @@ community@example.org",
     update_option('mrm_pay_hub_newsletter_unsubscribed', $final, false);
   }
 
+  private function mrm_marketing_unsubscribe_history() {
+    $raw = get_option(
+      'mrm_pay_hub_marketing_unsubscribe_history',
+      array()
+    );
+
+    $out = array();
+
+    foreach ((array)$raw as $item) {
+      if (!is_array($item)) {
+        continue;
+      }
+
+      $email = strtolower(
+        sanitize_email(
+          (string)($item['email'] ?? '')
+        )
+      );
+
+      $scope = sanitize_key(
+        (string)($item['scope'] ?? 'marketing')
+      );
+
+      $unsubscribed_at = sanitize_text_field(
+        (string)($item['unsubscribed_at'] ?? '')
+      );
+
+      if (!$email || !is_email($email)) {
+        continue;
+      }
+
+      if (
+        !in_array(
+          $scope,
+          array('newsletter', 'marketing'),
+          true
+        )
+      ) {
+        continue;
+      }
+
+      $out[$scope . '|' . $email] = array(
+        'email' => $email,
+        'scope' => $scope,
+        'unsubscribed_at' => $unsubscribed_at,
+      );
+    }
+
+    return $out;
+  }
+
+  private function mrm_marketing_record_unsubscribe_history(
+    $email,
+    $scope = 'marketing'
+  ) {
+    $email = strtolower(
+      sanitize_email((string)$email)
+    );
+
+    $scope = sanitize_key((string)$scope);
+
+    if (!$email || !is_email($email)) {
+      return false;
+    }
+
+    if (
+      !in_array(
+        $scope,
+        array('newsletter', 'marketing'),
+        true
+      )
+    ) {
+      $scope = 'marketing';
+    }
+
+    $history =
+      $this->mrm_marketing_unsubscribe_history();
+
+    /*
+     * The same email/scope key is intentionally replaced if the
+     * person previously resubscribed and later unsubscribes again.
+     * The display therefore reflects their newest CURRENT
+     * unsubscribe event.
+     */
+    $history[$scope . '|' . $email] = array(
+      'email' => $email,
+      'scope' => $scope,
+      'unsubscribed_at' =>
+        current_time('mysql', true),
+    );
+
+    update_option(
+      'mrm_pay_hub_marketing_unsubscribe_history',
+      array_values($history),
+      false
+    );
+
+    return true;
+  }
+
+  private function mrm_marketing_current_unsubscribe_rows() {
+    /*
+     * These remain the authoritative suppression lists.
+     * The history option never replaces them.
+     */
+    $marketing =
+      $this->mrm_marketing_unsubscribed_emails();
+
+    $newsletter =
+      $this->mrm_marketing_newsletter_unsubscribed_emails();
+
+    $history =
+      $this->mrm_marketing_unsubscribe_history();
+
+    $rows = array();
+
+    /*
+     * Global marketing suppression takes priority in the display.
+     */
+    foreach (
+      array_keys($marketing) as $email
+    ) {
+      $item =
+        $history[
+          'marketing|' . $email
+        ] ?? array();
+
+      $at = sanitize_text_field(
+        (string)(
+          $item['unsubscribed_at'] ?? ''
+        )
+      );
+
+      $ts = $at !== ''
+        ? strtotime($at . ' UTC')
+        : 0;
+
+      $rows[] = array(
+        'email' => $email,
+        'scope' => 'Marketing emails',
+        'unsubscribed_at' => $at,
+        'sort_ts' =>
+          $ts ? (int)$ts : 0,
+      );
+    }
+
+    /*
+     * Show newsletter-only suppression separately.
+     *
+     * If an email is already globally marketing-unsubscribed,
+     * don't duplicate it here.
+     */
+    foreach (
+      array_keys($newsletter) as $email
+    ) {
+      if (isset($marketing[$email])) {
+        continue;
+      }
+
+      $item =
+        $history[
+          'newsletter|' . $email
+        ] ?? array();
+
+      $at = sanitize_text_field(
+        (string)(
+          $item['unsubscribed_at'] ?? ''
+        )
+      );
+
+      $ts = $at !== ''
+        ? strtotime($at . ' UTC')
+        : 0;
+
+      $rows[] = array(
+        'email' => $email,
+        'scope' => 'Newsletter only',
+        'unsubscribed_at' => $at,
+        'sort_ts' =>
+          $ts ? (int)$ts : 0,
+      );
+    }
+
+    /*
+     * Recorded timestamps:
+     * newest -> oldest.
+     *
+     * Pre-existing unsubscribers with no historical timestamp:
+     * always appear beneath recorded entries.
+     */
+    usort(
+      $rows,
+      static function($a, $b) {
+        $a_ts =
+          (int)($a['sort_ts'] ?? 0);
+
+        $b_ts =
+          (int)($b['sort_ts'] ?? 0);
+
+        if (
+          $a_ts === 0 &&
+          $b_ts !== 0
+        ) {
+          return 1;
+        }
+
+        if (
+          $b_ts === 0 &&
+          $a_ts !== 0
+        ) {
+          return -1;
+        }
+
+        if ($a_ts !== $b_ts) {
+          return $b_ts <=> $a_ts;
+        }
+
+        /*
+         * Historical entries without timestamps cannot be
+         * truthfully ordered by unsubscribe date, so keep
+         * that group deterministic by sorting by email.
+         */
+        return strcasecmp(
+          (string)$a['email'],
+          (string)$b['email']
+        );
+      }
+    );
+
+    return $rows;
+  }
+
   private function mrm_marketing_add_unsubscribe($email) {
     $email = strtolower(sanitize_email((string)$email));
     if (!$email || !is_email($email)) return false;
@@ -17843,6 +18075,11 @@ community@example.org",
     $unsubscribed = $this->mrm_marketing_unsubscribed_emails();
     $unsubscribed[$email] = true;
     $this->mrm_marketing_save_unsubscribed_emails(array_keys($unsubscribed));
+
+    $this->mrm_marketing_record_unsubscribe_history(
+      $email,
+      'marketing'
+    );
 
     $lists = $this->mrm_marketing_manual_lists();
     foreach ($lists as $key => $emails) {
@@ -17859,6 +18096,11 @@ community@example.org",
     $unsubscribed = $this->mrm_marketing_newsletter_unsubscribed_emails();
     $unsubscribed[$email] = true;
     $this->mrm_marketing_save_newsletter_unsubscribed_emails(array_keys($unsubscribed));
+
+    $this->mrm_marketing_record_unsubscribe_history(
+      $email,
+      'newsletter'
+    );
 
     $lists = $this->mrm_marketing_manual_lists();
     if (!isset($lists['general_interest'])) $lists['general_interest'] = array();
@@ -27540,6 +27782,7 @@ MRM_TAX_RULES;
     );
     $marketing_unsubscribed = $this->mrm_marketing_unsubscribed_emails();
     $newsletter_unsubscribed = $this->mrm_marketing_newsletter_unsubscribed_emails();
+    $unsubscribe_rows = $this->mrm_marketing_current_unsubscribe_rows();
     $sent_log = $this->mrm_marketing_sent_log();
     $recent_campaigns = $this->mrm_marketing_recent_campaigns(10);
     $this->mrm_marketing_save_sent_log($sent_log);
@@ -28066,6 +28309,96 @@ MRM_TAX_RULES;
     }
     echo '<p><strong>Newsletter unsubscribed:</strong> ' . esc_html((string)count($newsletter_unsubscribed)) . '</p>';
     echo '<p><strong>Marketing unsubscribed:</strong> ' . esc_html((string)count($marketing_unsubscribed)) . '</p>';
+
+    echo '<h2 style="margin-top:24px;">Currently Unsubscribed Emails</h2>';
+
+    echo '<p class="description">'
+      . 'Read-only view of addresses that are currently suppressed. '
+      . 'New unsubscribe clicks are shown newest first. '
+      . 'Existing unsubscribes from before timestamp tracking was added are preserved exactly and appear at the bottom with the date marked as not recorded.'
+      . '</p>';
+
+    if (empty($unsubscribe_rows)) {
+
+      echo '<p>No email addresses are currently unsubscribed.</p>';
+
+    } else {
+
+      /*
+       * Roughly ten rows remain visible at once.
+       * Additional entries are available by scrolling vertically.
+       */
+      echo '<div style="'
+        . 'max-height:430px;'
+        . 'overflow-y:auto;'
+        . 'border:1px solid #ccd0d4;'
+        . 'background:#fff;'
+        . 'max-width:1000px;'
+        . '">';
+
+      echo '<table class="widefat striped" style="border:0;">';
+
+      /*
+       * Keep the headings visible while scrolling.
+       */
+      echo '<thead style="'
+        . 'position:sticky;'
+        . 'top:0;'
+        . 'z-index:1;'
+        . 'background:#fff;'
+        . '"><tr>';
+
+      echo '<th>Email</th>';
+      echo '<th>Unsubscribe Scope</th>';
+      echo '<th>Unsubscribed</th>';
+
+      echo '</tr></thead><tbody>';
+
+      foreach (
+        $unsubscribe_rows as $row
+      ) {
+
+        $unsubscribed_at =
+          (string)(
+            $row['unsubscribed_at'] ?? ''
+          );
+
+        /*
+         * Stored timestamps are UTC.
+         * Convert them into the WordPress/site timezone for display.
+         */
+        $display_date =
+          $unsubscribed_at !== ''
+            ? get_date_from_gmt(
+                $unsubscribed_at,
+                'M j, Y g:i a'
+              )
+            : 'Not recorded (pre-existing)';
+
+        echo '<tr>';
+
+        echo '<td><code>'
+          . esc_html(
+              (string)$row['email']
+            )
+          . '</code></td>';
+
+        echo '<td>'
+          . esc_html(
+              (string)$row['scope']
+            )
+          . '</td>';
+
+        echo '<td>'
+          . esc_html($display_date)
+          . '</td>';
+
+        echo '</tr>';
+      }
+
+      echo '</tbody></table>';
+      echo '</div>';
+    }
 
     echo '<hr><h2>Previously Sent Marketing Emails</h2>';
     echo '<p class="description">Most recent marketing sends, organized by recipient list and timestamp. Removing an entry deletes only this local history record; it cannot recall an email that was already delivered.</p>';
